@@ -521,6 +521,20 @@ class TaskKanbanView extends ItemView {
             }).open();
           })
       );
+      menu.addItem((item) =>
+        item
+          .setTitle("Déplacer vers une autre colonne…")
+          .setIcon("columns-3")
+          .onClick(() => {
+            new MoveModal(this.app, this.plugin, {
+              mode: "card",
+              scope: "current-board",
+              sourceView: this,
+              card,
+              section,
+            }).open();
+          })
+      );
       menu.addSeparator();
       menu.addItem((item) =>
         item
@@ -653,7 +667,8 @@ class TaskKanbanView extends ItemView {
         drag.card,
         section.key,
         targetCard,
-        placement.before
+        placement.before,
+        section.title
       );
     });
   }
@@ -1019,10 +1034,13 @@ class MoveModal extends Modal {
   }
 
   onOpen() {
+    const movingWithinCurrentBoard = this.details.scope === "current-board";
     this.titleEl.setText(
       this.details.mode === "lane"
         ? "Déplacer une colonne"
-        : "Déplacer une carte"
+        : movingWithinCurrentBoard
+          ? "Déplacer dans une colonne"
+          : "Déplacer une carte"
     );
     const { contentEl } = this;
     contentEl.empty();
@@ -1030,10 +1048,14 @@ class MoveModal extends Modal {
       text:
         this.details.mode === "lane"
           ? `Déplacer « ${this.details.section.title} » vers une autre note.`
-          : `Déplacer « ${this.details.card.title} » vers une autre note ou une autre colonne de cette note.`,
+          : movingWithinCurrentBoard
+            ? `Déplacer « ${this.details.card.title} » vers une autre colonne du tableau actuel.`
+            : `Déplacer « ${this.details.card.title} » vers un autre tableau.`,
     });
 
-    const boardLabel = contentEl.createEl("label", { text: "Note de destination" });
+    const boardLabel = contentEl.createEl("label", {
+      text: movingWithinCurrentBoard ? "Tableau actuel" : "Tableau de destination",
+    });
     this.boardSelect = contentEl.createEl("select");
     boardLabel.setAttribute("for", "tasks-kanban-target-board");
     this.boardSelect.id = "tasks-kanban-target-board";
@@ -1057,7 +1079,14 @@ class MoveModal extends Modal {
   }
 
   async loadBoards() {
-    this.boards = await this.plugin.getDestinationBoards(this.details.sourceView.filePath, true);
+    const sourcePath = this.details.sourceView.filePath;
+    const movingWithinCurrentBoard = this.details.scope === "current-board";
+    if (movingWithinCurrentBoard) {
+      const sourceFile = this.plugin.getMarkdownFile(sourcePath);
+      this.boards = sourceFile ? [sourceFile] : [];
+    } else {
+      this.boards = await this.plugin.getDestinationBoards(sourcePath);
+    }
     this.boardSelect.replaceChildren();
     this.boardSelect.createEl("option", { text: "Choisir une note…", value: "" });
     for (const board of this.boards) {
@@ -1066,6 +1095,13 @@ class MoveModal extends Modal {
     if (this.boards.length === 0) {
       this.boardSelect.createEl("option", { text: "Aucune note disponible", value: "" });
     }
+    if (movingWithinCurrentBoard && this.boards[0]) {
+      this.boardSelect.value = this.boards[0].path;
+      this.boardSelect.disabled = true;
+      await this.updateLanes();
+      return;
+    }
+    this.boardSelect.disabled = false;
     this.updateButton();
   }
 
@@ -2763,7 +2799,7 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     return lines.join(lineEnding);
   }
 
-  async moveCardWithinBoard(sourcePath, card, targetSectionKey, targetCard, insertBefore) {
+  async moveCardWithinBoard(sourcePath, card, targetSectionKey, targetCard, insertBefore, targetLaneTitle = "") {
     const file = this.getMarkdownFile(sourcePath);
     if (!file) return;
 
@@ -2779,8 +2815,11 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       lines.splice(sourceIndex, 1);
 
       const intermediate = lines.join(lineEnding);
-      const destination = this.parseBoard(intermediate).find(
+      const intermediateSections = this.parseBoard(intermediate);
+      const destination = intermediateSections.find(
         (section) => section.key === targetSectionKey
+      ) || intermediateSections.find(
+        (section) => targetLaneTitle && canonical(section.title) === canonical(targetLaneTitle)
       );
       if (!destination) return content;
 
