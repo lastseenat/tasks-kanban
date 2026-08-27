@@ -213,18 +213,18 @@ class TaskKanbanView extends ItemView {
       const cardCount = sections.reduce((sum, section) => sum + section.cards.length, 0);
       stats.setText(`${sections.length} colonne${sections.length > 1 ? "s" : ""} · ${cardCount} carte${cardCount > 1 ? "s" : ""}`);
       const boardActions = boardHeader.createDiv({ cls: "tasks-kanban-board-actions" });
-      const addBoard = boardActions.createEl("button", {
+      const addLane = boardActions.createEl("button", {
         cls: "tasks-kanban-icon-button clickable-icon",
         attr: {
           type: "button",
-          "aria-label": "Créer un nouveau tableau",
-          title: "Créer un nouveau tableau",
+          "aria-label": "Ajouter une colonne à ce tableau",
+          title: "Ajouter une colonne à ce tableau",
         },
       });
-      setIcon(addBoard, "plus");
-      addBoard.addEventListener("click", (event) => {
+      setIcon(addLane, "plus");
+      addLane.addEventListener("click", (event) => {
         event.stopPropagation();
-        new AddBoardModal(this.app, this.plugin, { sourceView: this }).open();
+        new AddLaneModal(this.app, this.plugin, { sourceView: this }).open();
       });
       const sortOrder = this.plugin.data.sortOrders[renderPath] || "none";
       const sortBoard = boardActions.createEl("button", {
@@ -1169,55 +1169,35 @@ class DeleteLaneModal extends Modal {
   }
 }
 
-class AddBoardModal extends Modal {
+class AddLaneModal extends Modal {
   constructor(app, plugin, details) {
     super(app);
     this.plugin = plugin;
     this.details = details;
     this.titleInput = null;
-    this.folderInput = null;
   }
 
   onOpen() {
     const { contentEl } = this;
-    const currentFile = this.plugin.getMarkdownFile(this.details.sourceView.filePath);
-    this.titleEl.setText("Nouveau tableau");
+    this.titleEl.setText("Nouvelle colonne");
     contentEl.empty();
-    const titleLabel = contentEl.createEl("label", { text: "Nom du tableau" });
+    const titleLabel = contentEl.createEl("label", { text: "Nom de la colonne" });
     this.titleInput = contentEl.createEl("input", {
       attr: {
         type: "text",
-        placeholder: "Ex. Projets maison",
+        placeholder: "Ex. Plus tard",
         autocomplete: "off",
       },
     });
-    this.titleInput.id = "tasks-kanban-new-board-title";
+    this.titleInput.id = "tasks-kanban-new-lane-title";
     titleLabel.setAttribute("for", this.titleInput.id);
-
-    const folderLabel = contentEl.createEl("label", { text: "Dossier" });
-    this.folderInput = contentEl.createEl("input", {
-      attr: {
-        type: "text",
-        list: "tasks-kanban-new-board-folders",
-        placeholder: "Dossier ou laisser vide pour la racine",
-        autocomplete: "off",
-      },
-    });
-    this.folderInput.id = "tasks-kanban-new-board-folder";
-    folderLabel.setAttribute("for", this.folderInput.id);
-    this.folderInput.value = currentFile?.parent?.path || "";
-    const folders = contentEl.createEl("datalist", { attr: { id: "tasks-kanban-new-board-folders" } });
-    folders.createEl("option", { value: "", text: "Racine du coffre" });
-    for (const folder of this.app.vault.getAllFolders().sort((a, b) => a.path.localeCompare(b.path, "fr"))) {
-      folders.createEl("option", { value: folder.path });
-    }
     contentEl.createEl("p", {
-      text: "Le tableau est créé avec une colonne « À faire » vide ; le tableau actuel reste ouvert.",
+      text: "La colonne sera ajoutée à la note Kanban actuellement ouverte.",
       cls: "tasks-kanban-modal-help",
     });
     const buttons = contentEl.createDiv({ cls: "modal-button-container" });
     const cancel = buttons.createEl("button", { text: "Annuler" });
-    const create = buttons.createEl("button", { text: "Créer", cls: "mod-cta" });
+    const create = buttons.createEl("button", { text: "Ajouter", cls: "mod-cta" });
     cancel.addEventListener("click", () => this.close());
     create.addEventListener("click", () => void this.confirm());
     this.titleInput.addEventListener("keydown", (event) => {
@@ -1229,9 +1209,9 @@ class AddBoardModal extends Modal {
   }
 
   async confirm() {
-    const created = await this.plugin.createBoard(
-      this.titleInput?.value || "",
-      this.folderInput?.value || ""
+    const created = await this.plugin.addLaneToBoard(
+      this.details.sourceView.filePath,
+      this.titleInput?.value || ""
     );
     if (created) this.close();
   }
@@ -2992,48 +2972,34 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     return true;
   }
 
-  async createBoard(title, destinationFolder) {
-    const fileName = String(title || "").trim().replace(/\.md$/i, "");
-    if (!fileName) {
-      new Notice("Indiquez un nom de tableau.");
+  async addLaneToBoard(path, title) {
+    const file = this.getMarkdownFile(path);
+    if (!file) {
+      new Notice("Le tableau n’est plus disponible.");
       return false;
     }
-    if (/[\\/:*?"<>|]/.test(fileName)) {
-      new Notice("Le nom du tableau contient un caractère non autorisé.");
+    const laneTitle = String(title || "").replace(/[\r\n]+/g, " ").replace(/^#+\s*/, "").trim();
+    if (!laneTitle) {
+      new Notice("Indiquez un nom de colonne.");
       return false;
     }
-    const folderPath = String(destinationFolder || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-    if (folderPath.includes("..")) {
-      new Notice("Indiquez un dossier du coffre sans « .. ».");
+    let added = false;
+    await this.processFile(file, (content) => {
+      const sections = this.parseBoard(content);
+      if (sections.some((section) => canonical(section.title) === canonical(laneTitle))) return content;
+      const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
+      const body = content.replace(/\s+$/, "");
+      added = true;
+      return `${body}${body ? `${lineEnding}${lineEnding}` : ""}## ${laneTitle}${lineEnding}`;
+    });
+    if (!added) {
+      new Notice("Une colonne porte déjà ce nom.");
       return false;
     }
-    const destination = folderPath ? this.app.vault.getAbstractFileByPath(folderPath) : null;
-    if (folderPath && (!destination || destination.children === undefined)) {
-      new Notice("Le dossier de destination n’existe pas.");
-      return false;
-    }
-    const path = normalizePath(folderPath ? `${folderPath}/${fileName}.md` : `${fileName}.md`);
-    if (this.app.vault.getAbstractFileByPath(path)) {
-      new Notice("Un tableau porte déjà ce nom dans ce dossier.");
-      return false;
-    }
-    try {
-      await this.app.vault.create(path, [
-        "---",
-        "kanban-plugin: board",
-        "tasks-kanban: board",
-        "---",
-        "",
-        `## ${DEFAULT_LANE}`,
-        "",
-      ].join("\n"));
-      new Notice(`Tableau « ${fileName} » créé.`);
-      return true;
-    } catch (error) {
-      console.error("Tâches Kanban: impossible de créer le tableau", error);
-      new Notice("Impossible de créer le tableau.");
-      return false;
-    }
+    this.boardTasks.delete(path);
+    this.refreshViews(path);
+    new Notice(`Colonne « ${laneTitle} » ajoutée.`);
+    return true;
   }
 
   async moveBoard(path, destinationFolder) {
