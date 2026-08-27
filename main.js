@@ -1030,7 +1030,7 @@ class MoveModal extends Modal {
       text:
         this.details.mode === "lane"
           ? `Déplacer « ${this.details.section.title} » vers une autre note.`
-          : `Déplacer « ${this.details.card.title} » vers une autre note.`,
+          : `Déplacer « ${this.details.card.title} » vers une autre note ou une autre colonne de cette note.`,
     });
 
     const boardLabel = contentEl.createEl("label", { text: "Note de destination" });
@@ -1057,7 +1057,7 @@ class MoveModal extends Modal {
   }
 
   async loadBoards() {
-    this.boards = await this.plugin.getDestinationBoards(this.details.sourceView.filePath);
+    this.boards = await this.plugin.getDestinationBoards(this.details.sourceView.filePath, true);
     this.boardSelect.replaceChildren();
     this.boardSelect.createEl("option", { text: "Choisir une note…", value: "" });
     for (const board of this.boards) {
@@ -2718,10 +2718,10 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     return clean.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "") || "Sous-taches";
   }
 
-  async getDestinationBoards(sourcePath) {
+  async getDestinationBoards(sourcePath, includeSource = false) {
     const boards = [];
     for (const file of this.app.vault.getMarkdownFiles()) {
-      if (file.path === sourcePath || file.path.startsWith(".trash/")) continue;
+      if ((!includeSource && file.path === sourcePath) || file.path.startsWith(".trash/")) continue;
       const content = await this.readFile(file);
       if (content.trim() === "" || this.isBoardContent(content)) boards.push(file);
     }
@@ -2819,8 +2819,21 @@ module.exports = class TasksKanbanPlugin extends Plugin {
   async moveCardToBoard(sourcePath, card, targetPath, targetLane) {
     const sourceFile = this.getMarkdownFile(sourcePath);
     const targetFile = this.getMarkdownFile(targetPath);
-    if (!sourceFile || !targetFile || sourcePath === targetPath) {
+    if (!sourceFile || !targetFile) {
       new Notice("La note de destination est invalide.");
+      return;
+    }
+
+    if (sourcePath === targetPath) {
+      const sections = this.parseBoard(await this.readFile(sourceFile));
+      const targetSection = sections.find(
+        (section) => canonical(section.title) === canonical(targetLane)
+      );
+      if (!targetSection) {
+        new Notice("La colonne de destination n’existe plus.");
+        return;
+      }
+      await this.moveCardWithinBoard(sourcePath, card, targetSection.key, null, false);
       return;
     }
 
@@ -2832,6 +2845,8 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       return;
     }
     const movedLine = sourceLines[sourceIndex].trimStart();
+    const sourceTasks = this.parseBoardTasks(sourceContent, sourcePath);
+    const sourceTask = sourceTasks.find((task) => task.lineIndex === sourceIndex);
     let inserted = false;
     await this.processFile(targetFile, (content) => {
       const next = this.appendCardToBoard(content, targetLane, movedLine);
@@ -2844,6 +2859,14 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       return;
     }
 
+    const targetContentAfter = await this.readFile(targetFile);
+    const targetTasksAfter = this.parseBoardTasks(targetContentAfter, targetPath);
+    const newTargetTask = [...targetTasksAfter]
+      .reverse()
+      .find((task) =>
+        task.laneTitle === canonical(targetLane) && task.rawLine.trimStart() === movedLine
+      );
+
     let removed = false;
     await this.processFile(sourceFile, (content) => {
       const lines = content.split(/\r?\n/);
@@ -2853,10 +2876,29 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       removed = true;
       return lines.join(content.includes("\r\n") ? "\r\n" : "\n");
     });
+    if (removed && sourceTask && newTargetTask) {
+      this.moveTimerState(sourceTask.key, newTargetTask.key);
+    }
     this.refreshViews(sourcePath);
     this.refreshViews(targetPath);
     if (removed) new Notice(`Carte déplacée vers « ${targetPath} »`);
     else new Notice(`Carte copiée vers « ${targetPath} » ; la source a changé entre-temps.`);
+  }
+
+  moveTimerState(oldKey, newKey) {
+    if (!oldKey || !newKey || oldKey === newKey) return;
+    let changed = false;
+    if (Object.prototype.hasOwnProperty.call(this.data.timers, oldKey)) {
+      this.data.timers[newKey] = this.data.timers[oldKey];
+      delete this.data.timers[oldKey];
+      changed = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(this.data.forcedStarts, oldKey)) {
+      this.data.forcedStarts[newKey] = this.data.forcedStarts[oldKey];
+      delete this.data.forcedStarts[oldKey];
+      changed = true;
+    }
+    if (changed) this.queueSave(true);
   }
 
   async moveLaneToBoard(sourcePath, section, targetPath, targetLane) {
