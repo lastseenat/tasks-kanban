@@ -217,7 +217,20 @@ class TaskKanbanView extends ItemView {
       const stats = boardHeader.createDiv({ cls: "tasks-kanban-board-stats" });
       const cardCount = sections.reduce((sum, section) => sum + section.cards.length, 0);
       stats.setText(`${sections.length} colonne${sections.length > 1 ? "s" : ""} · ${cardCount} carte${cardCount > 1 ? "s" : ""}`);
-
+      const boardActions = boardHeader.createDiv({ cls: "tasks-kanban-board-actions" });
+      const moveBoard = boardActions.createEl("button", {
+        cls: "tasks-kanban-icon-button clickable-icon",
+        attr: {
+          type: "button",
+          "aria-label": "Déplacer ce tableau vers un dossier",
+          title: "Déplacer ce tableau vers un dossier",
+        },
+      });
+      setIcon(moveBoard, "folder-input");
+      moveBoard.addEventListener("click", (event) => {
+        event.stopPropagation();
+        new MoveBoardModal(this.app, this.plugin, { sourceView: this }).open();
+      });
       this.renderSleepControls(renderTarget);
 
       if (sections.length === 0) {
@@ -1117,6 +1130,64 @@ class DeleteLaneModal extends Modal {
     const { sourceView, section } = this.details;
     this.close();
     await this.plugin.deleteLane(sourceView.filePath, section);
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class MoveBoardModal extends Modal {
+  constructor(app, plugin, details) {
+    super(app);
+    this.plugin = plugin;
+    this.details = details;
+    this.folderInput = null;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    const file = this.plugin.getMarkdownFile(this.details.sourceView.filePath);
+    this.titleEl.setText("Déplacer le tableau");
+    contentEl.empty();
+    const label = contentEl.createEl("label", { text: "Dossier de destination" });
+    this.folderInput = contentEl.createEl("input", {
+      attr: {
+        type: "text",
+        list: "tasks-kanban-board-folders",
+        placeholder: "Dossier ou laisser vide pour la racine",
+        autocomplete: "off",
+      },
+    });
+    this.folderInput.id = "tasks-kanban-board-folder";
+    label.setAttribute("for", this.folderInput.id);
+    this.folderInput.value = file?.parent?.path || "";
+    const folders = contentEl.createEl("datalist", { attr: { id: "tasks-kanban-board-folders" } });
+    folders.createEl("option", { value: "", text: "Racine du coffre" });
+    for (const folder of this.app.vault.getAllFolders().sort((a, b) => a.path.localeCompare(b.path, "fr"))) {
+      folders.createEl("option", { value: folder.path });
+    }
+    contentEl.createEl("p", {
+      text: "Les liens Obsidian vers ce tableau sont conservés et les minuteurs de ses cartes suivent le déplacement.",
+      cls: "tasks-kanban-modal-help",
+    });
+    const buttons = contentEl.createDiv({ cls: "modal-button-container" });
+    const cancel = buttons.createEl("button", { text: "Annuler" });
+    const move = buttons.createEl("button", { text: "Déplacer", cls: "mod-cta" });
+    cancel.addEventListener("click", () => this.close());
+    move.addEventListener("click", () => void this.confirm());
+    this.folderInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      void this.confirm();
+    });
+    this.folderInput.focus();
+    this.folderInput.select();
+  }
+
+  async confirm() {
+    const moved = await this.plugin.moveBoard(this.details.sourceView.filePath, this.folderInput?.value || "");
+    if (moved) this.close();
   }
 
   onClose() {
@@ -2814,6 +2885,68 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     this.boardTasks.delete(path);
     this.refreshViews(path);
     new Notice(`Liste « ${removedTitle} » supprimée.`);
+    return true;
+  }
+
+  async moveBoard(path, destinationFolder) {
+    const file = this.getMarkdownFile(path);
+    if (!file) {
+      new Notice("Le tableau n’est plus disponible.");
+      return false;
+    }
+    const folderPath = String(destinationFolder || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    if (folderPath.includes("..")) {
+      new Notice("Indiquez un dossier du coffre sans « .. ».");
+      return false;
+    }
+    const destination = folderPath ? this.app.vault.getAbstractFileByPath(folderPath) : null;
+    if (folderPath && (!destination || destination.children === undefined)) {
+      new Notice("Le dossier de destination n’existe pas.");
+      return false;
+    }
+    const targetPath = normalizePath(folderPath ? `${folderPath}/${file.name}` : file.name);
+    if (targetPath === file.path) {
+      new Notice("Le tableau est déjà dans ce dossier.");
+      return false;
+    }
+    if (this.app.vault.getAbstractFileByPath(targetPath)) {
+      new Notice("Un fichier porte déjà ce nom dans ce dossier.");
+      return false;
+    }
+
+    const tasksBeforeMove = this.parseBoardTasks(await this.readFile(file), path);
+    try {
+      await this.app.fileManager.renameFile(file, targetPath);
+    } catch (error) {
+      console.error("Tâches Kanban: impossible de déplacer le tableau", error);
+      new Notice("Impossible de déplacer le tableau.");
+      return false;
+    }
+
+    const movedFile = this.getMarkdownFile(targetPath);
+    const tasksAfterMove = movedFile ? this.parseBoardTasks(await this.readFile(movedFile), targetPath) : [];
+    let storeChanged = false;
+    for (let index = 0; index < Math.min(tasksBeforeMove.length, tasksAfterMove.length); index += 1) {
+      const oldKey = tasksBeforeMove[index].key;
+      const newKey = tasksAfterMove[index].key;
+      if (oldKey === newKey) continue;
+      if (Object.prototype.hasOwnProperty.call(this.data.timers, oldKey)) {
+        this.data.timers[newKey] = this.data.timers[oldKey];
+        delete this.data.timers[oldKey];
+        storeChanged = true;
+      }
+      if (Object.prototype.hasOwnProperty.call(this.data.forcedStarts, oldKey)) {
+        this.data.forcedStarts[newKey] = this.data.forcedStarts[oldKey];
+        delete this.data.forcedStarts[oldKey];
+        storeChanged = true;
+      }
+    }
+    if (storeChanged) this.queueSave(true);
+    this.boardTasks.delete(path);
+    this.boardTasks.delete(targetPath);
+    this.refreshViews(path);
+    this.refreshViews(targetPath);
+    new Notice(`Tableau déplacé vers « ${folderPath || "la racine du coffre"} »`);
     return true;
   }
 };

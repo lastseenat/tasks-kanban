@@ -42,6 +42,12 @@
   white-space: nowrap;
 }
 
+.tasks-kanban-board-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.3rem;
+}
+
 .tasks-kanban-sleep-bar {
   align-items: center;
   background: var(--background-secondary);
