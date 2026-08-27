@@ -248,8 +248,9 @@
   line-height: 1.2;
   margin: 0;
   min-width: 0;
-  overflow-wrap: normal;
-  word-break: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tasks-kanban-lane-meta {
