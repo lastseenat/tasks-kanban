@@ -1212,7 +1212,7 @@ class AddBoardModal extends Modal {
       folders.createEl("option", { value: folder.path });
     }
     contentEl.createEl("p", {
-      text: "Le tableau est créé avec une colonne « À faire » vide et s’ouvrira ici.",
+      text: "Le tableau est créé avec une colonne « À faire » vide ; le tableau actuel reste ouvert.",
       cls: "tasks-kanban-modal-help",
     });
     const buttons = contentEl.createDiv({ cls: "modal-button-container" });
@@ -3027,7 +3027,6 @@ module.exports = class TasksKanbanPlugin extends Plugin {
         `## ${DEFAULT_LANE}`,
         "",
       ].join("\n"));
-      await this.openBoard(path);
       new Notice(`Tableau « ${fileName} » créé.`);
       return true;
     } catch (error) {
