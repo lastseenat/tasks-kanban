@@ -131,11 +131,6 @@ class TaskKanbanView extends ItemView {
 
   async onOpen() {
     this.contentEl.addClass("tasks-kanban-view");
-    this.sortAction = this.addAction(
-      "arrow-down-up",
-      "Trier les cartes par durée",
-      () => void this.cycleSort()
-    );
     this.visibilityAction = this.addAction(
       "eye-off",
       "Afficher les colonnes secondaires",
@@ -233,25 +228,39 @@ class TaskKanbanView extends ItemView {
       });
       const sortOrder = this.plugin.data.sortOrders[renderPath] || "none";
       const sortBoard = boardActions.createEl("button", {
-        cls: "tasks-kanban-icon-button clickable-icon",
+        cls: "tasks-kanban-board-sort clickable-icon",
         attr: {
           type: "button",
-          "aria-label": sortOrder === "asc"
-            ? "Tri par durée croissante (cliquer pour décroissant)"
-            : sortOrder === "desc"
-              ? "Tri par durée décroissante (cliquer pour croissant)"
-              : "Trier ce tableau par durée croissante",
+          "aria-label": "Choisir le tri de ce tableau",
           title: sortOrder === "asc"
-            ? "Tri par durée croissante (cliquer pour décroissant)"
+            ? "Ce tableau est trié par durée croissante"
             : sortOrder === "desc"
-              ? "Tri par durée décroissante (cliquer pour croissant)"
-              : "Trier ce tableau par durée croissante",
+              ? "Ce tableau est trié par durée décroissante"
+              : "Choisir le tri de ce tableau",
         },
       });
       setIcon(sortBoard, sortOrder === "asc" ? "sort-asc" : sortOrder === "desc" ? "sort-desc" : "arrow-down-up");
+      sortBoard.appendText(
+        sortOrder === "asc" ? "Trier : durée ↑" : sortOrder === "desc" ? "Trier : durée ↓" : "Trier ce tableau"
+      );
       sortBoard.addEventListener("click", (event) => {
         event.stopPropagation();
-        void this.cycleSort();
+        const menu = new Menu();
+        menu.addItem((item) =>
+          item
+            .setTitle("Durée croissante")
+            .setIcon("sort-asc")
+            .setChecked(sortOrder === "asc")
+            .onClick(() => void this.setSortOrder("asc"))
+        );
+        menu.addItem((item) =>
+          item
+            .setTitle("Durée décroissante")
+            .setIcon("sort-desc")
+            .setChecked(sortOrder === "desc")
+            .onClick(() => void this.setSortOrder("desc"))
+        );
+        menu.showAtMouseEvent(event);
       });
       const moveBoard = boardActions.createEl("button", {
         cls: "tasks-kanban-icon-button clickable-icon",
@@ -923,24 +932,6 @@ class TaskKanbanView extends ItemView {
   }
 
   updateActions(sections) {
-    if (this.sortAction) {
-      const order = this.plugin.data.sortOrders[this.filePath] || "none";
-      const icon = order === "asc" ? "sort-asc" : order === "desc" ? "sort-desc" : "arrow-down-up";
-      const label =
-        order === "asc"
-          ? "Tri par durée croissante (cliquer pour décroissant)"
-          : order === "desc"
-            ? "Tri par durée décroissante (cliquer pour croissant)"
-            : "Trier les cartes par durée croissante";
-      if (this.sortAction.dataset.iconName !== icon) {
-        this.sortAction.replaceChildren();
-        setIcon(this.sortAction, icon);
-        this.sortAction.dataset.iconName = icon;
-      }
-      this.sortAction.setAttribute("aria-label", label);
-      this.sortAction.setAttribute("title", label);
-    }
-
     if (this.visibilityAction) {
       const secondary = sections.length > 1 ? sections.slice(1) : sections;
       const allHidden = secondary.length > 0 && secondary.every((section) =>
@@ -963,9 +954,15 @@ class TaskKanbanView extends ItemView {
   async cycleSort() {
     const current = this.plugin.data.sortOrders[this.filePath] || "none";
     const next = current === "asc" ? "desc" : "asc";
-    this.plugin.data.sortOrders[this.filePath] = next;
+    await this.setSortOrder(next);
+  }
+
+  async setSortOrder(order) {
+    if (!this.filePath || !["asc", "desc"].includes(order)) return;
+    if (this.plugin.data.sortOrders[this.filePath] === order) return;
+    this.plugin.data.sortOrders[this.filePath] = order;
     await this.plugin.saveStore();
-    await this.plugin.sortBoard(this.filePath, next);
+    await this.plugin.sortBoard(this.filePath, order);
   }
 
   async toggleLane(section) {
