@@ -1,0 +1,9 @@
+{
+  "id": "tasks-kanban",
+  "name": "Tâches Kanban",
+  "version": "0.5.2",
+  "minAppVersion": "1.4.0",
+  "description": "Vue Kanban autonome pour les notes de tâches Markdown.",
+  "author": "LiNkE",
+  "isDesktopOnly": false
+}
