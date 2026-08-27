@@ -102,7 +102,6 @@ class TaskKanbanView extends ItemView {
     this.sleepControls = null;
     this.sections = [];
     this.identities = new Map();
-    this.dragState = null;
     this.dropTarget = null;
   }
 
@@ -142,7 +141,7 @@ class TaskKanbanView extends ItemView {
   }
 
   async onClose() {
-    this.dragState = null;
+    if (this.plugin.dragState?.sourceView === this) this.plugin.clearCardDrag();
     this.clearDropIndicator();
     this.plugin.views.delete(this);
     this.renderQueued = false;
@@ -441,11 +440,17 @@ class TaskKanbanView extends ItemView {
       if (editingLabel) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        this.dragState = null;
+        this.plugin.clearCardDrag();
         cardElement.classList.remove("is-dragging");
         return;
       }
-      this.dragState = { card, section, element: cardElement };
+      this.plugin.beginCardDrag({
+        sourceView: this,
+        sourcePath: this.filePath,
+        card,
+        section,
+        element: cardElement,
+      });
       cardElement.classList.add("is-dragging");
       if (event.dataTransfer) {
         event.dataTransfer.effectAllowed = "move";
@@ -457,9 +462,7 @@ class TaskKanbanView extends ItemView {
       }
     });
     cardElement.addEventListener("dragend", () => {
-      cardElement.classList.remove("is-dragging");
-      this.dragState = null;
-      this.clearDropIndicator();
+      if (this.plugin.dragState?.element === cardElement) this.plugin.clearCardDrag();
     });
 
     const checkbox = cardElement.createEl("input", {
@@ -515,6 +518,20 @@ class TaskKanbanView extends ItemView {
           .onClick(() => {
             new MoveModal(this.app, this.plugin, {
               mode: "card",
+              sourceView: this,
+              card,
+              section,
+            }).open();
+          })
+      );
+      menu.addItem((item) =>
+        item
+          .setTitle("Déplacer vers une autre colonne…")
+          .setIcon("columns-3")
+          .onClick(() => {
+            new MoveModal(this.app, this.plugin, {
+              mode: "card",
+              scope: "current-board",
               sourceView: this,
               card,
               section,
@@ -622,7 +639,7 @@ class TaskKanbanView extends ItemView {
 
   setupDropZone(cards, section) {
     cards.addEventListener("dragover", (event) => {
-      if (!this.dragState) return;
+      if (!this.plugin.dragState) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
       this.updateDropIndicator(cards, this.getDropPlacement(event, cards));
@@ -633,34 +650,45 @@ class TaskKanbanView extends ItemView {
     });
     cards.addEventListener("drop", (event) => {
       event.preventDefault();
-      if (!this.dragState) {
+      if (!this.plugin.dragState) {
         this.clearDropIndicator();
         return;
       }
 
-      const drag = this.dragState;
+      const drag = this.plugin.dragState;
       const placement = this.getDropPlacement(event, cards);
       const targetCard = placement.element
         ? this.findCardByLineIndex(placement.element.dataset.lineIndex)
         : null;
-      this.dragState = null;
-      this.clearDropIndicator();
+      this.plugin.clearCardDrag();
       if (placement.isSelf) return;
-      if (targetCard?.lineIndex === drag.card.lineIndex) return;
+      if (drag.sourcePath === this.filePath && targetCard?.lineIndex === drag.card.lineIndex) return;
 
-      void this.plugin.moveCardWithinBoard(
-        this.filePath,
-        drag.card,
-        section.key,
-        targetCard,
-        placement.before
-      );
+      if (drag.sourcePath === this.filePath) {
+        void this.plugin.moveCardWithinBoard(
+          this.filePath,
+          drag.card,
+          section.key,
+          targetCard,
+          placement.before,
+          section.title
+        );
+      } else {
+        void this.plugin.moveCardToBoard(
+          drag.sourcePath,
+          drag.card,
+          this.filePath,
+          section.title,
+          targetCard,
+          placement.before
+        );
+      }
     });
   }
 
   getDropPlacement(event, cards) {
     const candidate = event.target?.closest?.(CARD_SELECTOR);
-    const isSelf = candidate === this.dragState?.element;
+    const isSelf = candidate === this.plugin.dragState?.element;
     const element = candidate && cards.contains(candidate) && !isSelf
       ? candidate
       : null;
@@ -1019,10 +1047,13 @@ class MoveModal extends Modal {
   }
 
   onOpen() {
+    const movingWithinCurrentBoard = this.details.scope === "current-board";
     this.titleEl.setText(
       this.details.mode === "lane"
         ? "Déplacer une colonne"
-        : "Déplacer une carte"
+        : movingWithinCurrentBoard
+          ? "Déplacer dans une colonne"
+          : "Déplacer une carte"
     );
     const { contentEl } = this;
     contentEl.empty();
@@ -1030,10 +1061,14 @@ class MoveModal extends Modal {
       text:
         this.details.mode === "lane"
           ? `Déplacer « ${this.details.section.title} » vers une autre note.`
-          : `Déplacer « ${this.details.card.title} » vers une autre note ou une autre colonne de cette note.`,
+          : movingWithinCurrentBoard
+            ? `Déplacer « ${this.details.card.title} » vers une autre colonne du tableau actuel.`
+            : `Déplacer « ${this.details.card.title} » vers un autre tableau.`,
     });
 
-    const boardLabel = contentEl.createEl("label", { text: "Note de destination" });
+    const boardLabel = contentEl.createEl("label", {
+      text: movingWithinCurrentBoard ? "Tableau actuel" : "Tableau de destination",
+    });
     this.boardSelect = contentEl.createEl("select");
     boardLabel.setAttribute("for", "tasks-kanban-target-board");
     this.boardSelect.id = "tasks-kanban-target-board";
@@ -1057,7 +1092,14 @@ class MoveModal extends Modal {
   }
 
   async loadBoards() {
-    this.boards = await this.plugin.getDestinationBoards(this.details.sourceView.filePath, true);
+    const sourcePath = this.details.sourceView.filePath;
+    const movingWithinCurrentBoard = this.details.scope === "current-board";
+    if (movingWithinCurrentBoard) {
+      const sourceFile = this.plugin.getMarkdownFile(sourcePath);
+      this.boards = sourceFile ? [sourceFile] : [];
+    } else {
+      this.boards = await this.plugin.getDestinationBoards(sourcePath);
+    }
     this.boardSelect.replaceChildren();
     this.boardSelect.createEl("option", { text: "Choisir une note…", value: "" });
     for (const board of this.boards) {
@@ -1066,6 +1108,13 @@ class MoveModal extends Modal {
     if (this.boards.length === 0) {
       this.boardSelect.createEl("option", { text: "Aucune note disponible", value: "" });
     }
+    if (movingWithinCurrentBoard && this.boards[0]) {
+      this.boardSelect.value = this.boards[0].path;
+      this.boardSelect.disabled = true;
+      await this.updateLanes();
+      return;
+    }
+    this.boardSelect.disabled = false;
     this.updateButton();
   }
 
@@ -1404,6 +1453,7 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     this.fileProcessQueues = new Map();
     this.saveQueued = null;
     this.autoOpenToken = 0;
+    this.dragState = null;
 
     this.registerView(VIEW_TYPE, (leaf) => {
       const view = new TaskKanbanView(leaf, this);
@@ -1489,9 +1539,22 @@ module.exports = class TasksKanbanPlugin extends Plugin {
   }
 
   onunload() {
+    this.clearCardDrag();
     if (this.saveQueued) window.clearTimeout(this.saveQueued);
     this.views.clear();
     void this.saveData(this.data);
+  }
+
+  beginCardDrag(details) {
+    this.clearCardDrag();
+    this.dragState = details;
+  }
+
+  clearCardDrag() {
+    const drag = this.dragState;
+    if (drag?.element?.isConnected) drag.element.classList.remove("is-dragging");
+    this.dragState = null;
+    for (const view of this.views || []) view.clearDropIndicator();
   }
 
   async autoOpenActiveBoard() {
@@ -2736,7 +2799,7 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     return `${preferred} (${suffix})`;
   }
 
-  appendCardToBoard(content, laneTitle, line) {
+  appendCardToBoard(content, laneTitle, line, targetCard = null, insertBefore = false) {
     if (String(content || "").trim() === "") {
       return [
         "---",
@@ -2757,13 +2820,30 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       (candidate) => canonical(candidate.title) === canonical(laneTitle)
     );
     if (!section) return null;
-    let insertAt = section.end;
-    while (insertAt > section.start + 1 && lines[insertAt - 1].trim() === "") insertAt -= 1;
+    let insertAt = -1;
+    if (targetCard) {
+      let targetIndex = Number(targetCard.lineIndex);
+      const isTargetInLane = (index) =>
+        Number.isInteger(index) &&
+        index > section.start &&
+        index < section.end &&
+        lines[index] === targetCard.rawLine;
+      if (!isTargetInLane(targetIndex)) {
+        targetIndex = lines.findIndex((candidate, index) =>
+          index > section.start && index < section.end && candidate === targetCard.rawLine
+        );
+      }
+      if (targetIndex >= 0) insertAt = targetIndex + (insertBefore ? 0 : 1);
+    }
+    if (insertAt < 0) {
+      insertAt = section.end;
+      while (insertAt > section.start + 1 && lines[insertAt - 1].trim() === "") insertAt -= 1;
+    }
     lines.splice(insertAt, 0, line.trimStart());
     return lines.join(lineEnding);
   }
 
-  async moveCardWithinBoard(sourcePath, card, targetSectionKey, targetCard, insertBefore) {
+  async moveCardWithinBoard(sourcePath, card, targetSectionKey, targetCard, insertBefore, targetLaneTitle = "") {
     const file = this.getMarkdownFile(sourcePath);
     if (!file) return;
 
@@ -2779,8 +2859,11 @@ module.exports = class TasksKanbanPlugin extends Plugin {
       lines.splice(sourceIndex, 1);
 
       const intermediate = lines.join(lineEnding);
-      const destination = this.parseBoard(intermediate).find(
+      const intermediateSections = this.parseBoard(intermediate);
+      const destination = intermediateSections.find(
         (section) => section.key === targetSectionKey
+      ) || intermediateSections.find(
+        (section) => targetLaneTitle && canonical(section.title) === canonical(targetLaneTitle)
       );
       if (!destination) return content;
 
@@ -2816,7 +2899,7 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     new Notice("Carte déplacée.");
   }
 
-  async moveCardToBoard(sourcePath, card, targetPath, targetLane) {
+  async moveCardToBoard(sourcePath, card, targetPath, targetLane, targetCard = null, insertBefore = false) {
     const sourceFile = this.getMarkdownFile(sourcePath);
     const targetFile = this.getMarkdownFile(targetPath);
     if (!sourceFile || !targetFile) {
@@ -2833,7 +2916,14 @@ module.exports = class TasksKanbanPlugin extends Plugin {
         new Notice("La colonne de destination n’existe plus.");
         return;
       }
-      await this.moveCardWithinBoard(sourcePath, card, targetSection.key, null, false);
+      await this.moveCardWithinBoard(
+        sourcePath,
+        card,
+        targetSection.key,
+        targetCard,
+        insertBefore,
+        targetLane
+      );
       return;
     }
 
@@ -2849,7 +2939,13 @@ module.exports = class TasksKanbanPlugin extends Plugin {
     const sourceTask = sourceTasks.find((task) => task.lineIndex === sourceIndex);
     let inserted = false;
     await this.processFile(targetFile, (content) => {
-      const next = this.appendCardToBoard(content, targetLane, movedLine);
+      const next = this.appendCardToBoard(
+        content,
+        targetLane,
+        movedLine,
+        targetCard,
+        insertBefore
+      );
       if (next === null) return content;
       inserted = true;
       return next;
