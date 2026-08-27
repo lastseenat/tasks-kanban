@@ -231,6 +231,28 @@ class TaskKanbanView extends ItemView {
         event.stopPropagation();
         new AddBoardModal(this.app, this.plugin, { sourceView: this }).open();
       });
+      const sortOrder = this.plugin.data.sortOrders[renderPath] || "none";
+      const sortBoard = boardActions.createEl("button", {
+        cls: "tasks-kanban-icon-button clickable-icon",
+        attr: {
+          type: "button",
+          "aria-label": sortOrder === "asc"
+            ? "Tri par durée croissante (cliquer pour décroissant)"
+            : sortOrder === "desc"
+              ? "Tri par durée décroissante (cliquer pour croissant)"
+              : "Trier ce tableau par durée croissante",
+          title: sortOrder === "asc"
+            ? "Tri par durée croissante (cliquer pour décroissant)"
+            : sortOrder === "desc"
+              ? "Tri par durée décroissante (cliquer pour croissant)"
+              : "Trier ce tableau par durée croissante",
+        },
+      });
+      setIcon(sortBoard, sortOrder === "asc" ? "sort-asc" : sortOrder === "desc" ? "sort-desc" : "arrow-down-up");
+      sortBoard.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void this.cycleSort();
+      });
       const moveBoard = boardActions.createEl("button", {
         cls: "tasks-kanban-icon-button clickable-icon",
         attr: {
